@@ -1,22 +1,18 @@
 """
-evaluate.py
-============
+evaluate.py (v2)
+================
 학습된 분류기를 test set에서 평가.
-발표용 결과물 생성:
-  - 카테고리별 Precision / Recall / F1 표
-  - macro / micro / weighted F1 비교
-  - per-language 성능 (영/한)
-  - confusion matrix (카테고리별 binary)
-  - LR vs MLP 비교 표
 
-출력:
-  results/metrics.json
-  results/comparison.csv
-  results/confusion_matrix.png  (matplotlib 있으면)
-  results/per_category.csv
+v2 개선:
+  - --min-support: 카테고리별 support가 N 미만이면 macro-F1 계산 시 제외 (소수 카테고리 노이즈 방지)
+  - --balanced: pseudo + labeled를 균등하게 섞은 균형 test set으로 평가
+  - 한글 폰트 자동 검색/설정 (matplotlib glyph 경고 해결)
+  - 통계 진단 정보 강화
 
 사용:
-  python evaluate.py
+  python evaluate.py                          # 기본 평가
+  python evaluate.py --min-support 100        # support<100 카테고리 macro에서 제외
+  python evaluate.py --balanced               # pseudo 포함 균형 test set
   python evaluate.py --only lr
 """
 
@@ -50,24 +46,76 @@ CATEGORY_KO = {
 }
 
 
-def load_test(conn):
-    cat_cols = ", ".join(f"l.{c}" for c in CATEGORIES)
-    sql = f"""
-        SELECT t.id, t.lang, e.vector, {cat_cols}
-        FROM texts t
-        JOIN splits s     ON t.id = s.text_id
-        JOIN embeddings e ON t.id = e.text_id
-        JOIN labels l     ON t.id = l.text_id
-        WHERE s.split = 'test'
+def load_test(conn, balanced: bool = False):
     """
+    test set 로드.
+    
+    balanced=False: 기본 test split만 사용 (전체 test)
+    balanced=True:  pseudo + labeled를 균등하게 섞어 토픽 균형 맞춤
+                    (소수 카테고리에 pseudo의 toxic 라벨 더 포함)
+    """
+    cat_cols = ", ".join(f"l.{c}" for c in CATEGORIES)
+
+    if balanced:
+        # 모든 split 다 가져와서 카테고리별로 균형있게 샘플
+        sql = f"""
+            SELECT t.id, t.lang, l.label_source, e.vector, {cat_cols}
+            FROM texts t
+            JOIN embeddings e ON t.id = e.text_id
+            JOIN labels l     ON t.id = l.text_id
+        """
+    else:
+        sql = f"""
+            SELECT t.id, t.lang, l.label_source, e.vector, {cat_cols}
+            FROM texts t
+            JOIN splits s     ON t.id = s.text_id
+            JOIN embeddings e ON t.id = e.text_id
+            JOIN labels l     ON t.id = l.text_id
+            WHERE s.split = 'test'
+        """
     rows = conn.execute(sql).fetchall()
     if not rows:
         return None
-    ids   = [r[0] for r in rows]
-    langs = [r[1] for r in rows]
-    X = np.vstack([np.frombuffer(r[2], dtype=np.float32) for r in rows])
-    Y = np.array([r[3:] for r in rows], dtype=np.int8)
-    return X, Y, ids, langs
+
+    ids     = [r[0] for r in rows]
+    langs   = [r[1] for r in rows]
+    sources = [r[2] for r in rows]
+    X = np.vstack([np.frombuffer(r[3], dtype=np.float32) for r in rows])
+    Y = np.array([r[4:] for r in rows], dtype=np.int8)
+
+    if balanced:
+        # 카테고리별 양성 샘플이 너무 적으면 pseudo에서 추가로 끌어옴
+        # 단순 전략: pseudo의 양성 모두 + human 정상의 무작위 동수 샘플
+        from collections import Counter
+        is_pseudo = np.array([s == "llm_pseudo" for s in sources])
+        is_human  = ~is_pseudo
+        is_toxic  = (Y.sum(axis=1) > 0)
+
+        # 1) pseudo 전부 포함
+        # 2) human 정상 중에서 동수 샘플
+        n_pseudo = is_pseudo.sum()
+        n_human_clean_available = (is_human & ~is_toxic).sum()
+        n_human_sample = min(n_pseudo, n_human_clean_available)
+
+        np.random.seed(42)
+        pseudo_idx = np.where(is_pseudo)[0]
+        human_clean_idx = np.where(is_human & ~is_toxic)[0]
+        if n_human_sample < n_human_clean_available:
+            human_clean_idx = np.random.choice(human_clean_idx, n_human_sample, replace=False)
+
+        # 토픽 라벨 있는 human 토픽도 포함 (있다면)
+        human_toxic_idx = np.where(is_human & is_toxic)[0]
+
+        keep = np.concatenate([pseudo_idx, human_clean_idx, human_toxic_idx])
+        np.random.shuffle(keep)
+        X = X[keep]; Y = Y[keep]
+        ids = [ids[i] for i in keep]; langs = [langs[i] for i in keep]
+        sources = [sources[i] for i in keep]
+
+        logger.info(f"  balanced test: total={len(X)}, pseudo={n_pseudo}, "
+                    f"human_clean={n_human_sample}, human_toxic={len(human_toxic_idx)}")
+
+    return X, Y, ids, langs, sources
 
 
 def predict_lr(X):
@@ -111,11 +159,14 @@ def predict_mlp(X):
 # 메트릭 계산
 # ──────────────────────────────────────────────
 
-def compute_metrics(Y_true, Y_pred):
-    """카테고리별 + 평균 메트릭"""
+def compute_metrics(Y_true, Y_pred, min_support: int = 0):
+    """카테고리별 + 평균 메트릭. min_support 미만 카테고리는 별도 macro도 계산."""
     from sklearn.metrics import precision_recall_fscore_support, f1_score
+    import numpy as np
 
     per_cat = []
+    f1_per_cat = []
+    eligible_idxs = []   # min_support 이상인 카테고리의 인덱스
     for i, c in enumerate(CATEGORIES):
         p, r, f, _ = precision_recall_fscore_support(
             Y_true[:, i], Y_pred[:, i],
@@ -131,17 +182,30 @@ def compute_metrics(Y_true, Y_pred):
             "f1":        float(f),
             "support":   n_pos_true,
             "predicted": n_pos_pred,
+            "eligible":  bool(n_pos_true >= min_support),
         })
+        f1_per_cat.append(float(f))
+        if n_pos_true >= min_support:
+            eligible_idxs.append(i)
 
+    # 표준 메트릭 (전체 카테고리)
     macro_f1    = f1_score(Y_true, Y_pred, average="macro",    zero_division=0)
     micro_f1    = f1_score(Y_true, Y_pred, average="micro",    zero_division=0)
     weighted_f1 = f1_score(Y_true, Y_pred, average="weighted", zero_division=0)
 
+    # 카테고리 필터링한 macro-F1 (소수 카테고리 노이즈 제거용)
+    macro_f1_filtered = None
+    if min_support > 0 and eligible_idxs:
+        macro_f1_filtered = float(np.mean([f1_per_cat[i] for i in eligible_idxs]))
+
     return {
-        "per_category": per_cat,
-        "macro_f1":     float(macro_f1),
-        "micro_f1":     float(micro_f1),
-        "weighted_f1":  float(weighted_f1),
+        "per_category":      per_cat,
+        "macro_f1":          float(macro_f1),
+        "micro_f1":          float(micro_f1),
+        "weighted_f1":       float(weighted_f1),
+        "macro_f1_filtered": macro_f1_filtered,
+        "min_support":       min_support,
+        "eligible_categories": [CATEGORIES[i] for i in eligible_idxs],
     }
 
 
@@ -166,17 +230,25 @@ def compute_per_lang_metrics(Y_true, Y_pred, langs):
 # ──────────────────────────────────────────────
 
 def print_per_category_table(metrics, title):
+    min_sup = metrics.get("min_support", 0)
     logger.info(f"\n  ━━━ {title}: 카테고리별 ━━━")
-    logger.info(f"  {'카테고리':12s} {'P':>7s} {'R':>7s} {'F1':>7s} {'Support':>9s} {'Predicted':>10s}")
+    header = f"  {'카테고리':12s} {'P':>7s} {'R':>7s} {'F1':>7s} {'Support':>9s} {'Predicted':>10s}"
+    if min_sup > 0:
+        header += f"  {'eligible':>8s}"
+    logger.info(header)
     for r in metrics["per_category"]:
-        logger.info(
-            f"  {r['category_ko']:12s} {r['precision']:7.3f} {r['recall']:7.3f} "
-            f"{r['f1']:7.3f} {r['support']:9d} {r['predicted']:10d}"
-        )
+        line = (f"  {r['category_ko']:12s} {r['precision']:7.3f} {r['recall']:7.3f} "
+                f"{r['f1']:7.3f} {r['support']:9d} {r['predicted']:10d}")
+        if min_sup > 0:
+            line += f"  {'O' if r.get('eligible') else 'x':>8s}"
+        logger.info(line)
     logger.info(f"  {'─'*55}")
-    logger.info(f"  macro-F1   : {metrics['macro_f1']:.4f}")
-    logger.info(f"  micro-F1   : {metrics['micro_f1']:.4f}")
-    logger.info(f"  weighted-F1: {metrics['weighted_f1']:.4f}")
+    logger.info(f"  macro-F1    : {metrics['macro_f1']:.4f}")
+    logger.info(f"  micro-F1    : {metrics['micro_f1']:.4f}")
+    logger.info(f"  weighted-F1 : {metrics['weighted_f1']:.4f}")
+    if metrics.get("macro_f1_filtered") is not None:
+        eligible = metrics["eligible_categories"]
+        logger.info(f"  macro-F1 (support≥{min_sup}, {len(eligible)}개): {metrics['macro_f1_filtered']:.4f}")
 
 
 def print_per_lang(per_lang, title):
@@ -212,16 +284,55 @@ def save_csv(per_cat_lr, per_cat_mlp, path: Path):
     logger.info(f"  저장: {path}")
 
 
-def plot_confusion_matrices(Y_true, Y_pred, model_name: str, path: Path):
-    """카테고리별 binary confusion matrix를 한 figure에 그림"""
+_FONT_SETUP_DONE = False
+
+
+def _setup_korean_font():
+    """Matplotlib에 한글 폰트 설정. 시스템에 있는 한글 폰트 자동 검색."""
+    global _FONT_SETUP_DONE
+    if _FONT_SETUP_DONE:
+        return
+    _FONT_SETUP_DONE = True
     try:
         import matplotlib
         matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+
+        # 우선순위: 우분투에 흔히 있는 한글 폰트들
+        candidates = [
+            "NanumGothic", "Nanum Gothic", "Noto Sans CJK KR",
+            "Noto Sans KR", "Malgun Gothic", "AppleGothic", "UnDotum",
+            "Source Han Sans KR", "DejaVu Sans",
+        ]
+        installed = {f.name for f in font_manager.fontManager.ttflist}
+        chosen = next((c for c in candidates if c in installed), None)
+        if chosen:
+            plt.rcParams["font.family"] = chosen
+            plt.rcParams["axes.unicode_minus"] = False
+            logger.info(f"  한글 폰트: {chosen}")
+        else:
+            logger.warning(f"  한글 폰트 없음. 영문 레이블 사용. "
+                           f"`sudo apt install fonts-nanum` 권장")
+    except Exception as e:
+        logger.warning(f"  폰트 설정 실패: {e}")
+
+
+def plot_confusion_matrices(Y_true, Y_pred, model_name: str, path: Path):
+    """카테고리별 binary confusion matrix를 한 figure에 그림"""
+    try:
+        _setup_korean_font()
         import matplotlib.pyplot as plt
     except ImportError:
         logger.warning("  matplotlib 없음 — 시각화 건너뜀")
         return
     from sklearn.metrics import confusion_matrix
+
+    # 한글 폰트 없으면 영문 카테고리명 사용
+    import matplotlib
+    has_korean = any(k in matplotlib.rcParams["font.family"] for k in
+                     ["Nanum", "Noto", "Malgun", "AppleGothic", "UnDotum", "Han"])
+    label_fn = (lambda c: CATEGORY_KO[c]) if has_korean else (lambda c: c)
 
     fig, axes = plt.subplots(2, 4, figsize=(14, 7))
     axes = axes.flatten()
@@ -229,7 +340,7 @@ def plot_confusion_matrices(Y_true, Y_pred, model_name: str, path: Path):
         ax = axes[i]
         cm = confusion_matrix(Y_true[:, i], Y_pred[:, i], labels=[0, 1])
         im = ax.imshow(cm, cmap="Blues", aspect="equal")
-        ax.set_title(f"{CATEGORY_KO[c]}", fontsize=10)
+        ax.set_title(label_fn(c), fontsize=10)
         ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
         ax.set_xticklabels(["neg", "pos"]); ax.set_yticklabels(["neg", "pos"])
         ax.set_xlabel("pred"); ax.set_ylabel("true")
@@ -237,6 +348,11 @@ def plot_confusion_matrices(Y_true, Y_pred, model_name: str, path: Path):
             for jj in range(2):
                 ax.text(jj, ii, str(cm[ii, jj]), ha="center", va="center",
                         color="white" if cm[ii, jj] > cm.max()/2 else "black", fontsize=10)
+    # 마지막 1칸 비움 (7카테고리)
+    if len(CATEGORIES) < len(axes):
+        for j in range(len(CATEGORIES), len(axes)):
+            axes[j].axis("off")
+
     plt.suptitle(f"Confusion Matrices ({model_name})")
     plt.tight_layout()
     plt.savefig(path, dpi=120, bbox_inches="tight")
@@ -251,10 +367,15 @@ def plot_confusion_matrices(Y_true, Y_pred, model_name: str, path: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", choices=["lr", "mlp"], default=None)
+    ap.add_argument("--min-support", type=int, default=50,
+                    help="Macro-F1 계산 시 이 미만 카테고리는 제외 (소수 카테고리 노이즈 방지)")
+    ap.add_argument("--balanced", action="store_true",
+                    help="Test set에 pseudo도 포함 (영/한 균형, 카테고리 분포 개선)")
     args = ap.parse_args()
 
     logger.info("=" * 60)
-    logger.info("[4단계] 평가 (Test set)")
+    logger.info("[4단계] 평가")
+    logger.info(f"  min_support: {args.min_support}  |  balanced: {args.balanced}")
     logger.info("=" * 60)
 
     if not DB_PATH.exists():
@@ -264,12 +385,17 @@ def main():
     RESULTS_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
 
-    test = load_test(conn)
+    test = load_test(conn, balanced=args.balanced)
     if test is None:
         logger.error("  test set이 비어있음.")
         return
-    X_test, Y_test, _, langs = test
-    logger.info(f"  Test: {X_test.shape}, langs: {set(langs)}")
+    X_test, Y_test, _, langs, sources = test
+    logger.info(f"  Test: {X_test.shape}, langs: {set(langs)}, sources: {set(sources)}")
+
+    # 진단: 라벨 출처별 분포
+    from collections import Counter
+    src_counter = Counter(sources)
+    logger.info(f"  test 출처: {dict(src_counter)}")
 
     all_results = {}
     metrics_lr = None
@@ -279,7 +405,7 @@ def main():
     if args.only != "mlp" and (MODELS_DIR / "lr_model.pkl").exists():
         logger.info("\n  ━━━ Logistic Regression ━━━")
         Y_pred_lr, _ = predict_lr(X_test)
-        metrics_lr = compute_metrics(Y_test, Y_pred_lr)
+        metrics_lr = compute_metrics(Y_test, Y_pred_lr, min_support=args.min_support)
         per_lang_lr = compute_per_lang_metrics(Y_test, Y_pred_lr, langs)
         print_per_category_table(metrics_lr, "LR")
         print_per_lang(per_lang_lr, "LR")
@@ -291,7 +417,7 @@ def main():
         logger.info("\n  ━━━ MLP ━━━")
         try:
             Y_pred_mlp, _ = predict_mlp(X_test)
-            metrics_mlp = compute_metrics(Y_test, Y_pred_mlp)
+            metrics_mlp = compute_metrics(Y_test, Y_pred_mlp, min_support=args.min_support)
             per_lang_mlp = compute_per_lang_metrics(Y_test, Y_pred_mlp, langs)
             print_per_category_table(metrics_mlp, "MLP")
             print_per_lang(per_lang_mlp, "MLP")
@@ -303,13 +429,21 @@ def main():
     # ── 비교 ──
     if metrics_lr and metrics_mlp:
         logger.info("\n" + "=" * 60)
-        logger.info("  최종 비교 (Test set)")
+        logger.info("  최종 비교")
         logger.info("=" * 60)
-        logger.info(f"  {'Metric':<15s} {'LR':>10s} {'MLP':>10s} {'Diff':>10s}")
+        logger.info(f"  {'Metric':<24s} {'LR':>10s} {'MLP':>10s} {'Diff':>10s}")
         for k in ["macro_f1", "micro_f1", "weighted_f1"]:
             lr_v = metrics_lr[k]; mlp_v = metrics_mlp[k]
             diff = mlp_v - lr_v
-            logger.info(f"  {k:<15s} {lr_v:>10.4f} {mlp_v:>10.4f} {diff:>+10.4f}")
+            logger.info(f"  {k:<24s} {lr_v:>10.4f} {mlp_v:>10.4f} {diff:>+10.4f}")
+        # filtered macro
+        lr_f = metrics_lr.get("macro_f1_filtered")
+        mlp_f = metrics_mlp.get("macro_f1_filtered")
+        if lr_f is not None and mlp_f is not None:
+            elig = metrics_lr.get("eligible_categories", [])
+            label = f"macro_f1 (support≥{args.min_support})"
+            logger.info(f"  {label:<24s} {lr_f:>10.4f} {mlp_f:>10.4f} {mlp_f-lr_f:>+10.4f}")
+            logger.info(f"    ↳ 평가 카테고리 ({len(elig)}개): {elig}")
         save_csv(metrics_lr["per_category"], metrics_mlp["per_category"], RESULTS_DIR / "comparison.csv")
     elif metrics_lr:
         save_csv(metrics_lr["per_category"], None, RESULTS_DIR / "per_category_lr.csv")
