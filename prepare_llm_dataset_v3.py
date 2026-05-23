@@ -54,6 +54,7 @@ from multilabel_filter import (
     load_bad, load_hate_speech, load_toxigen,
     load_hatexplain, load_ethos, load_kmhas,
     load_korean_unsmile, load_jigsaw,
+    load_or_cache,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -177,13 +178,13 @@ def main():
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     logger.info("\n[1/4] 데이터 로드...")
     bad_safe, bad_unsafe = load_bad()
-    hate       = load_hate_speech()
-    toxigen    = load_toxigen()
-    hatexplain = load_hatexplain()
-    ethos      = load_ethos()
-    jigsaw     = load_jigsaw()
-    kmhas      = load_kmhas()
-    unsmile    = load_korean_unsmile()
+    hate       = load_or_cache("hate_speech", load_hate_speech)
+    toxigen    = load_or_cache("toxigen",     load_toxigen)
+    hatexplain = load_or_cache("hatexplain",  load_hatexplain)
+    ethos      = load_or_cache("ethos",       load_ethos)
+    jigsaw     = load_or_cache("jigsaw",      load_jigsaw)
+    kmhas      = load_or_cache("kmhas",       load_kmhas)
+    unsmile    = load_or_cache("unsmile",     load_korean_unsmile)
     aihub      = load_aihub()
 
     # lang 컬럼 추가
