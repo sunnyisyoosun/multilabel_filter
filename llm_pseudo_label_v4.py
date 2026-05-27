@@ -18,7 +18,7 @@ llm_pseudo_label_v4.py
       INTJ:1.0 ADJ:0.8 VERB:0.7 PROPN:0.6 NOUN:0.5 → max < threshold면 정상으로 패스
 
 카테고리 (7개):
-  profanity / hate_speech / sexual_harassment / sexism / threat / political / other
+  profanity / hate_speech / gender / threat / political / other
 """
 
 from __future__ import annotations
@@ -61,14 +61,13 @@ SKIP_THRESHOLD = 0.6
 USE_POS_SCORING = True
 
 CATEGORIES = [
-    "profanity", "hate_speech", "sexual_harassment", "sexism", "threat",
+    "profanity", "hate_speech", "gender", "threat",
     "political", "other",
 ]
 CATEGORY_KO = {
     "profanity":         "욕설",
     "hate_speech":       "혐오발언",
-    "sexual_harassment": "성희롱",
-    "sexism":            "성차별",
+    "gender":            "성 관련",
     "threat":            "살해협박",
     "political":         "정치",
     "other":             "기타유해",
@@ -84,8 +83,7 @@ SYSTEM_PROMPT = """You are a content moderation classifier.
 Categories (multi-label, [] if benign):
 - profanity: vulgar/swear words
 - hate_speech: attacks based on race/ethnicity/religion/nationality/LGBTQ/disability
-- sexual_harassment: explicit sexual insults or content
-- sexism: explicit gender-based attacks
+- gender: gender-based attacks, sexism, or explicit sexual insults/content
 - threat: explicit threats of violence/harm/death
 - political: attacks on politicians, parties, or political ideology groups
 - other: appearance shaming, ageism, regional, or other clear toxicity not above

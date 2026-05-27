@@ -42,12 +42,12 @@ OUT_PATH = Path("data/llm_dataset/pseudo_labeled_filtered.jsonl.gz")
 DROP_IF_LEN_BELOW = 5
 
 CATEGORIES = [
-    "profanity", "hate_speech", "sexual_harassment", "sexism", "threat",
+    "profanity", "hate_speech", "gender", "threat",
     "political", "other",
 ]
 CATEGORY_KO = {
-    "profanity": "욕설", "hate_speech": "혐오발언", "sexual_harassment": "성희롱",
-    "sexism": "성차별", "threat": "살해협박", "political": "정치", "other": "기타유해",
+    "profanity": "욕설", "hate_speech": "혐오발언", "gender": "성 관련",
+    "threat": "살해협박", "political": "정치", "other": "기타유해",
 }
 
 
@@ -86,30 +86,26 @@ KEYWORDS = {
                "한남", "한녀", "맘충", "김치녀", "외국인", "이주민", "난민",
                "탈북", "북한", "조선"],
     },
-    "sexual_harassment": {
-        "en": [r"\bsex", r"\bporn", r"\bnude", r"\bnaked", r"\brape",
-               r"\bpenis", r"\bvagina", r"\bbreast", r"\btit\b", r"\bass\b",
-               r"\bfuck me", r"\bhorny", r"\bslut", r"\bwhore", r"\bcum\b",
-               r"\bmolest", r"\bgrope", r"\bharass"],
-        "ko": ["섹스", "성관계", "강간", "성폭행", "야동", "포르노",
-               "보지", "자지", "성기", "가슴", "젖", "엉덩이",
-               "꼴려", "발기", "사정", "딸딸", "야해",
-               "변태", "성희롱", "성추행", "야사", "찌찌"],
-    },
-    "sexism": {
-        # 성차별 — 성별 단어가 반드시 있어야 함
+    "gender": {
+        # 성차별 + 성희롱 통합 (여성/남성 관련 + 성적 표현)
         "en": [r"\bwoman", r"\bwomen", r"\bman\b", r"\bmen\b",
                r"\bgirl", r"\bboy", r"\bfemale", r"\bmale\b",
                r"\bfeminis", r"\bsexist", r"\bmisogyn",
                r"\bbitch", r"\bslut", r"\bwhore", r"\bcunt",
                r"\bhousewife", r"\bpregnant", r"\bmother", r"\bfather",
                r"\bgender", r"\blady", r"\bladies", r"\bguy", r"\bguys",
-               r"\bdude", r"\bchick", r"\bbabe"],
+               r"\bdude", r"\bchick", r"\bbabe",
+               r"\bsex", r"\bporn", r"\bnude", r"\bnaked", r"\brape",
+               r"\bpenis", r"\bvagina", r"\bbreast", r"\btit\b",
+               r"\bhorny", r"\bcum\b", r"\bmolest", r"\bgrope", r"\bharass"],
         "ko": ["여자", "여성", "남자", "남성", "여친", "남친", "와이프", "남편",
                "암컷", "수컷", "년", "놈", "김치녀", "한남", "한녀", "맘충",
                "페미", "성차별", "여혐", "남혐", "보지", "자지",
                "주부", "아내", "엄마", "어머니", "처녀", "총각", "임신", "임산부",
-               "메갈", "워마드", "한남충", "보슬", "자슬"],
+               "메갈", "워마드", "한남충", "보슬", "자슬",
+               "섹스", "성관계", "강간", "성폭행", "야동", "포르노",
+               "성기", "가슴", "젖", "엉덩이", "꼴려", "발기", "사정",
+               "딸딸", "야해", "변태", "성희롱", "성추행", "야사", "찌찌"],
     },
     "threat": {
         "en": [r"\bkill", r"\bshoot", r"\bgun\b", r"\bmurder", r"\bdie\b",
@@ -165,13 +161,12 @@ KEYWORDS = {
 # 카테고리별 신뢰도 (R2에서 라벨 줄일 때 사용)
 # 키워드 매칭이 명확한 카테고리가 신뢰도 높음
 CATEGORY_CONFIDENCE = {
-    "profanity":         3,  # 명확한 욕설 사전
-    "threat":            3,  # 명확한 위협 단어
-    "political":         3,  # 정치인/정당명 매칭
-    "hate_speech":       2,  # 인종/종교/LGBTQ 단어
-    "sexism":            2,  # 성별 단어 필수
-    "sexual_harassment": 2,  # 성적 단어 필수
-    "other":             1,  # 가장 포괄적, 신뢰도 낮음
+    "profanity":   3,  # 명확한 욕설 사전
+    "threat":      3,  # 명확한 위협 단어
+    "political":   3,  # 정치인/정당명 매칭
+    "hate_speech": 2,  # 인종/종교/LGBTQ 단어
+    "gender":      2,  # 성별/성적 단어 필수
+    "other":       1,  # 가장 포괄적, 신뢰도 낮음
 }
 
 

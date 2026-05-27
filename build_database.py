@@ -35,7 +35,7 @@ LABELED_PATH    = Path("data/llm_dataset/labeled.json")
 PSEUDO_PATH     = Path("data/llm_dataset/pseudo_labeled_filtered.jsonl.gz")
 
 CATEGORIES = [
-    "profanity", "hate_speech", "sexual_harassment", "sexism", "threat",
+    "profanity", "hate_speech", "gender", "threat",
     "political", "other",
 ]
 

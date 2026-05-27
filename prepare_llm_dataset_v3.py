@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from multilabel_filter import (
     CATEGORIES, CATEGORY_KO,
     load_bad, load_hate_speech, load_toxigen,
-    load_hatexplain, load_ethos, load_kmhas,
+    load_hatexplain, load_ethos, load_khaters,
     load_korean_unsmile, load_jigsaw,
     load_or_cache,
 )
@@ -183,19 +183,19 @@ def main():
     hatexplain = load_or_cache("hatexplain",  load_hatexplain)
     ethos      = load_or_cache("ethos",       load_ethos)
     jigsaw     = load_or_cache("jigsaw",      load_jigsaw)
-    kmhas      = load_or_cache("kmhas",       load_kmhas)
+    khaters    = load_or_cache("khaters",     load_khaters)
     unsmile    = load_or_cache("unsmile",     load_korean_unsmile)
     aihub      = load_aihub()
 
     # lang 컬럼 추가
     for df, lang in [(hate, "en"), (toxigen, "en"), (hatexplain, "en"),
                      (ethos, "en"), (jigsaw, "en"), (bad_safe, "en"),
-                     (bad_unsafe, "en"), (kmhas, "ko"), (unsmile, "ko"), (aihub, "ko")]:
+                     (bad_unsafe, "en"), (khaters, "ko"), (unsmile, "ko"), (aihub, "ko")]:
         df["lang"] = lang
 
     logger.info(f"  소스별 건수:")
     logger.info(f"    영어: hate={len(hate):,} toxigen={len(toxigen):,} hatexplain={len(hatexplain):,} ethos={len(ethos):,} jigsaw={len(jigsaw):,} bad_safe={len(bad_safe):,}")
-    logger.info(f"    한국어: kmhas={len(kmhas):,} unsmile={len(unsmile):,} aihub={len(aihub):,}")
+    logger.info(f"    한국어: khaters={len(khaters):,} unsmile={len(unsmile):,} aihub={len(aihub):,}")
     logger.info(f"    pseudo 대상: bad_unsafe={len(bad_unsafe):,}")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -209,7 +209,7 @@ def main():
         ("ethos",        ethos),
         ("jigsaw",       jigsaw),
         ("bad_safe",     bad_safe),
-        ("kmhas",        kmhas),
+        ("khaters",      khaters),
         ("unsmile",      unsmile),
         ("aihub",        aihub),
         ("bad_unsafe",   bad_unsafe),
@@ -222,7 +222,7 @@ def main():
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     logger.info("\n[3/4] 데이터 품질 관리...")
     en_df = pd.concat([hate, toxigen, hatexplain, ethos, jigsaw, bad_safe], ignore_index=True)
-    ko_df = pd.concat([kmhas, unsmile, aihub], ignore_index=True)
+    ko_df = pd.concat([khaters, unsmile, aihub], ignore_index=True)
 
     en_df = quality_check(en_df, "영어")
     ko_df = quality_check(ko_df, "한국어")
@@ -268,7 +268,7 @@ def main():
 
     # ── 한국어: kmhas + unsmile에서 유해/정상 추출 ──
     # is_toxic 플래그는 multilabel_filter에서 카테고리 합으로 만들어졌다고 가정
-    ko_pool = pd.concat([kmhas, unsmile], ignore_index=True)
+    ko_pool = pd.concat([khaters, unsmile], ignore_index=True)
     if "is_toxic" in ko_pool.columns:
         ko_unsafe_pool = ko_pool[ko_pool["is_toxic"] == 1].reset_index(drop=True)
         ko_safe_pool   = ko_pool[ko_pool["is_toxic"] == 0].reset_index(drop=True)
