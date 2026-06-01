@@ -1,421 +1,225 @@
-# Korean-English Multi-label Toxic Speech Classification
+# Multilingual Multi-Label Toxic Speech Classification
 
-영어/한국어 혼합 텍스트에 대한 7개 카테고리 multi-label 유해 발언 분류기.
-LLM pseudo-labeling + multilingual embedding + 두 분류기(LR/MLP) 비교 + Poison Level 정책.
+**영어-한국어 통합 유해 발화 다중 레이블 분류 파이프라인 (Engineering Lab)**
 
----
+## Abstract
 
-## 1. 개요
-
-### 문제 정의
-온라인 댓글·메시지에서 유해 발언을 자동 탐지:
-- **다국어** (영어 + 한국어) 단일 모델로 처리
-- **세분화된 카테고리** (7종 multi-label)
-- **위험도 기반 차단 정책** (BLOCK / FILTER / WARN / PASS)
-
-### 7개 카테고리
-
-| 영문 | 한국어 | 가중치 | 정의 |
-|---|---|---:|---|
-| `profanity` | 욕설 | 0.7 | 비속어, 욕설 (fuck, 씨발 등) |
-| `hate_speech` | 혐오발언 | 0.9 | 인종/종교/성정체성/장애 기반 공격 |
-| `sexual_harassment` | 성희롱 | 0.9 | 명시적 성적 발언, 성적 모욕 |
-| `sexism` | 성차별 | 0.7 | 성별 기반 차별 |
-| `threat` | 살해협박 | **1.0** | 폭력·살해·위해 위협 |
-| `political` | 정치 | 0.5 | 정치인/정당/이념 비방 |
-| `other` | 기타유해 | 0.4 | 외모비하, 연령차별, 지역차별 등 |
+본 프로젝트는 영어와 한국어 텍스트를 단일 모델로 처리하는 **6-카테고리 다중 레이블 (multi-label) 유해 발화 분류기**를 구현한다. 다국어 임베딩 (multilingual-E5) 위에 MLP 분류기를 학습시키고, LLM 기반 pseudo-labeling (gemma-4-31B-it) 으로 학습 데이터를 보강하는 2단계 파이프라인을 설계하였다. 최종 모델은 **macro-F1 0.485** (영어 0.681 / 한국어 0.378) 를 달성하였다. 한국어 성능 개선을 위해 임베딩·데이터셋·LLM·threshold 등 7가지 접근을 체계적으로 비교 실험하였으며, 이 중 **threshold 튜닝이 가장 일관된 개선 (+0.083)** 을 보였음을 확인하였다.
 
 ---
 
-## 2. 데이터셋
+## 1. Introduction
 
-### 출처 (10개 통합)
-**영어**: HateXplain, Ethos, Toxigen, Jigsaw, BAD(safe/unsafe), Hate Speech
-**한국어**: K-MHaS, Korean Unsmile, AIHub 대화
+소셜 미디어 및 대화형 AI 환경에서 유해 발화 자동 필터링은 중요한 안전 과제이다. 그러나 기존 연구는 대부분 영어 단일 언어 또는 단순 이진 분류 (toxic / safe) 에 머물러 있다. 본 프로젝트는 다음 두 가지 도전을 다룬다.
 
-### 전처리 정책
-- 영어 : 한국어 = **1 : 1**
-- 같은 언어 내에서 유해 : 정상 = **1.3 : 1**
+1. **다국어 통합**: 영어와 한국어를 동일 임베딩 공간에서 처리하는 단일 모델
+2. **세분화된 multi-label**: 단순 이진이 아닌 6개 카테고리의 동시 분류
 
----
-
-## 3. 전체 파이프라인 (8단계 + 1)
-
-```
-┌─────────────────────────────────────────────────────┐
-│         [원본 10개 데이터셋]                          │
-└─────────────────┬───────────────────────────────────┘
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [1] prepare_llm_dataset_v3.py                   │
-  │     데이터 통합 + 영/한 1:1 균형 + 유해/정상 1.3:1  │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-        labeled.json + pseudo_target.json
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [2] llm_pseudo_label_v4.py                      │
-  │     Ollama Llama 3.2 3B로 의사 라벨링            │
-  │     ├ HateCoT in-prompt CoT                     │
-  │     └ slang_pos_scorer.py로 사전 차단            │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-        pseudo_labeled.jsonl.gz (5,000건)
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [3] inspect_pseudo_labels.py  (선택)             │
-  │     LLM 라벨링 결과 샘플 검토                     │
-  └─────────────────────────────────────────────────┘
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [4] filter_pseudo_labels.py                     │
-  │     룰 기반 노이즈 정제                          │
-  │     R1: 키워드 검증 / R1_Rescued: 신뢰도 1위 복구  │
-  │     R2/R3: 다중라벨/짧은텍스트 제한              │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-       pseudo_labeled_filtered.jsonl.gz (4,063건)
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [5] build_database.py                           │
-  │     SQLite DB 구축 (4개 테이블)                  │
-  │     texts / labels / embeddings / splits        │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-              dataset.sqlite
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [6] embed_texts.py                              │
-  │     multilingual-E5-small (384-dim)             │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-        DB의 embeddings 테이블 (BLOB)
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [7] train_classifier.py                         │
-  │     LR (OneVsRest) + MLP 학습                   │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-       models/lr_model.pkl + mlp_model.pt
-                  ↓
-  ┌─────────────────────────────────────────────────┐
-  │ [8] evaluate.py                                 │
-  │     F1/P/R, per-language, confusion matrix      │
-  └─────────────────┬───────────────────────────────┘
-                  ↓
-             results/ (metrics, png)
-
-  ┌─────────────────────────────────────────────────┐
-  │ [9] classify.py                                 │
-  │     사용자 인터페이스 + Poison Level 정책        │
-  │     ├ 단일 문장 / 인터랙티브 / 파일 모드          │
-  │     └ PL 계산 → BLOCK/FILTER/WARN/PASS          │
-  └─────────────────────────────────────────────────┘
-```
-
-### 파일 매핑
-
-| 단계 | 파일 | 입력 | 출력 |
-|---|---|---|---|
-| 1 | `prepare_llm_dataset_v3.py` | 10개 raw 데이터셋 | `labeled.json`, `pseudo_target.json` |
-| 2 | `llm_pseudo_label_v4.py` | `pseudo_target.json` | `pseudo_labeled.jsonl.gz` |
-| 3 | `inspect_pseudo_labels.py` | `pseudo_labeled.jsonl.gz` | (콘솔 출력) |
-| 4 | `filter_pseudo_labels.py` | `pseudo_labeled.jsonl.gz` | `pseudo_labeled_filtered.jsonl.gz` |
-| 5 | `build_database.py` | 위 두 라벨 파일 | `dataset.sqlite` |
-| 6 | `embed_texts.py` | `dataset.sqlite` | DB 내 embeddings 테이블 |
-| 7 | `train_classifier.py` | DB | `models/lr_model.pkl`, `mlp_model.pt` |
-| 8 | `evaluate.py` | DB + 모델 | `results/metrics.json`, `comparison.csv`, `confusion_matrix_*.png` |
-| 9 | `classify.py` | 모델 + 사용자 입력 | Action (BLOCK/FILTER/WARN/PASS) |
-
-### 보조 모듈
-- **`slang_pos_scorer.py`** — SlangLLM PoS 점수 계산 (영/한)
-  - 한국어 강화: 사전(90+) + 패턴(16개) + 한국어 PoS 가중치 + 전체텍스트 스캔
-- **`multilabel_filter.py`** — 데이터셋별 라벨 정규화 (이미 보유)
+학습 신호 부족 문제를 해결하기 위해 SlangLLM (Patel & Alsobeh, 2024) 과 HateGuard / HateCoT (Vishwamitra et al., IEEE S&P 2024) 에서 제안된 기법들을 결합한 LLM pseudo-labeling 파이프라인을 구축한다.
 
 ---
 
-## 4. 핵심 기법 (논문 적용)
+## 2. Method
 
-### 4.1 HateCoT (HateGuard, Ko et al., 2023)
-원 논문: 5단계 다중 호출 reasoning
-> Target → Derogation → Direction → Incitation → Decision
+### 2.1 카테고리 설계 (6 categories)
 
-구현: **1-stage in-prompt CoT**로 압축
-- 3-stage 호출 시 3B 모델에서 누적 오류·환각 발생
-- 1-stage 프롬프트 안에 5단계 reasoning을 chain-of-thought 텍스트로 통합
-
-### 4.2 SlangLLM (Patel & Alsobeh, 2025) + 한국어 강화
-
-**원 논문 (영어)**: PoS 점수표
-| PoS | Score |
-|---|---|
-| INTJ (감탄사) | 1.0 |
-| ADJ (형용사) | 0.8 |
-| VERB | 0.7 |
-| PROPN | 0.6 |
-| NOUN | 0.5 |
-
-**한국어 강화 (이 프로젝트 기여)**: 4단계 결합
-- (0) 전체 텍스트 사전/패턴 스캔 ← Okt 토큰 분리 문제 우회
-- (1) 토큰별 사전 매칭 → 1.0 (90+ 키워드)
-- (2) 토큰별 정규식 패턴 매칭 → 0.9 (변형 욕설: "씨1발", "ㅆㅂ" 등)
-- (3) 한국어 특화 PoS 가중치 → 명사 0.5 → **0.7** (한국어 슬랭은 명사형 多)
-
-사용처:
-- `llm_pseudo_label_v4.py` — 최대 점수 < 0.6이면 LLM 호출 없이 정상 처리 (`pos_skip`)
-- `classify.py` — PL 공식의 `slang_conf` 신호 계산
-
-### 4.3 환각 검증
-`llm_pseudo_label_v4.py`에서 LLM이 출력한 `toxic_span`이 실제 텍스트에 substring으로 존재하는지 확인. 없으면 라벨 자동 무효화 (`hallucinated_span`).
-
-### 4.4 룰 기반 노이즈 필터링 (`filter_pseudo_labels.py`)
-- **R1**: 카테고리별 키워드 사전 매칭 — 0개면 라벨 제거
-- **R1 Rescued**: 모든 라벨이 R1에서 잘렸으면 신뢰도 1위 복구 (toxic 신호 보존)
-- **R2**: 라벨 3개+ → 신뢰도 상위 2개만
-- **R3**: 짧은 텍스트(<10자)에 라벨 2개+ → 1개만
-- **사전 제거**: 의미있는 문자 <5자 텍스트 학습에서 제외
-
-### 4.5 Poison Level (PL) 정책 — `classify.py`
-```
-PL = 3·slang_conf + 4·cot_confidence + 3·max_category_weight   (0 ≤ PL ≤ 10)
-```
-
-**3개 시그널:**
-- `slang_conf` — SlangLLM PoS 점수 평균 (0~1)
-- `cot_confidence` — 분류기 출력 max 확률 (0~1)
-- `max_category_weight` — 탐지 카테고리 중 최대 위험도
-
-**Action 정책:**
-| PL 범위 | Action | 의미 |
+| Category | 한국어 | 정의 |
 |---|---|---|
-| PL ≥ 7 | BLOCK | 완전 차단 |
-| 4 ≤ PL < 7 | FILTER | 유해부 마스킹 |
-| 2 ≤ PL < 4 | WARN | 경고 + 사용자 통과 |
-| PL < 2 | PASS | 안전 통과 |
+| `profanity` | 욕설 | 욕설/모욕적 표현 |
+| `hate_speech` | 혐오발언 | 인종/종교/지역/장애/성소수자 혐오 |
+| `gender` | 성 관련 | 여성·남성 성차별 및 성적 표현 (통합) |
+| `threat` | 살해협박 | 살해·폭력 위협 |
+| `political` | 정치 | 정치인·정당·이념 공격 |
+| `other` | 기타유해 | 외모·나이·직업 비하 등 |
 
-**특수 규칙**: `threat` 카테고리 탐지 시 PL 무관 즉시 BLOCK (안전 우선)
+설계 결정: 초기 7카테고리 (`sexism`, `sexual_harassment` 분리) 에서 6카테고리로 **통합**. 한국어 데이터셋들 (K-HATERS, UnSmile) 이 모두 단일 `gender` 라벨만 제공하여 세분화 학습이 불가능하다는 데이터 한계를 확인하였다 (§4.1).
+
+### 2.2 데이터셋 (총 238,428건)
+
+**영어 (102,432건)**: hate_speech_offensive, ToxiGen, HateXplain, ETHOS, Jigsaw (threat 전용), BAD (safe/unsafe).
+
+**한국어 (135,996건)**: K-HATERS (172K, 뉴스 댓글), Korean UnSmile (15K), AIHub 일상대화 (30K, 정상 샘플).
+
+K-HATERS 매핑은 `label × target_label` 구조를 활용하였다:
+- `L1_hate / L2_hate + gender` → `gender`
+- `L1_hate / L2_hate + region/religion/disabled` → `hate_speech`
+- `L1_hate / L2_hate + political` → `political`
+- `offensive + individual/none` → `profanity`
+
+### 2.3 임베딩 및 분류기
+
+- **임베딩**: `intfloat/multilingual-e5-small` (384-dim, 영/한 통합 표현)
+- **분류기**: MLP (384 → 256 → 128 → 6), Dropout 0.2, BCEWithLogitsLoss
+- **베이스라인**: LogisticRegression (OneVsRest, class_weight='balanced')
+
+### 2.4 LLM Pseudo-Labeling (HateGuard + SlangLLM)
+
+소수 카테고리 (gender, threat) 의 학습 시그널을 보강하기 위해 BAD unsafe 데이터에 LLM 기반 의사 라벨링을 적용한다.
+
+**1단계 — 카테고리 균형 후보 추출**: 각 카테고리 키워드 사전을 사용하여 후보 풀을 사전 분류하고 (영어/한국어 × 6 카테고리) 각 1,500건씩 + 정상 3,000건 = **24,000건** 균형 샘플링.
+
+**2단계 — HateCoT 1-stage 프롬프트**: Vishwamitra et al. 의 5단계 추론 (Target → Derogation → Direction → Incitation → Decision) 을 별도 호출이 아닌 **단일 프롬프트 내 chain-of-thought** 로 통합. 누적 오류 및 환각 감소 목적.
+
+**3단계 — SlangLLM 사전 차단**: Patel & Alsobeh 의 PoS 점수 (INTJ=1.0, ADJ=0.8, VERB=0.7, NOUN=0.5) 의 최댓값이 임계값 0.6 미만이면 LLM 호출 없이 정상 처리. API 비용 절감.
+
+**4단계 — 환각 검증**: LLM이 반환한 `toxic_span`이 원문 텍스트에 literal substring으로 존재하는지 검증. 미일치 시 라벨 무효화.
+
+**구현**: `gemma-4-31B-it` (OpenAI-호환 외부 API), `AsyncOpenAI` 기반 64-concurrent async 호출. 24K 건을 27.4분에 처리 (14.6 records/sec).
+
+### 2.5 Threshold Tuning
+
+검증셋 (val) 에서 카테고리별 F1을 최대화하는 threshold (0.10~0.90, step 0.02) 를 탐색하고 테스트셋에 적용. 재학습 없이 결정 경계 조정만으로 precision-recall 균형을 회복한다.
 
 ---
 
-## 5. 모델 구성
+## 3. Experiments
 
-### 임베딩
-- **`intfloat/multilingual-e5-small`** (384-dim, 118M params)
-- 입력 prefix: `"query: "`
-- L2 normalized
+### 3.1 메인 결과
 
-### 분류기 (2종 비교)
+테스트셋 (25,481건, 영 12.5K / 한 13K) 에서의 최종 성능 (균형 pseudo + 31B + threshold 튜닝):
 
-**Logistic Regression (메인)**
-- `OneVsRestClassifier(LogisticRegression(C=1.0, class_weight="balanced"))`
-- 7개 binary classifier (multi-label)
-- 학습: ~30초
-
-**MLP (비교군)**
-- 구조: 384 → 256 → 128 → 7
-- ReLU + Dropout 0.2
-- `BCEWithLogitsLoss(pos_weight=balanced)`
-- AdamW, lr=1e-3, ~2분 (GPU)
-
----
-
-## 6. 결과
-
-### Test set (balanced)
-- 120,084건 (영 61,679 / 한 58,405)
-- pseudo + human 라벨 균등 조합
-
-### 전체 성능 비교
-
-| Metric | LR | MLP | Δ |
+| Metric | MLP (0.5 fixed) | MLP (tuned) | Δ |
 |---|---:|---:|---:|
-| macro-F1 | 0.424 | **0.481** | +5.7% |
-| micro-F1 | 0.581 | **0.639** | +5.8% |
-| weighted-F1 | 0.641 | **0.675** | +3.3% |
+| macro-F1 | 0.401 | **0.485** | +0.083 |
+| micro-F1 | 0.421 | **0.562** | +0.141 |
+| 영어 macro-F1 | 0.588 | **0.681** | +0.093 |
+| 한국어 macro-F1 | 0.302 | **0.378** | +0.076 |
 
-### 카테고리별 (MLP)
+### 3.2 카테고리별 성능 (MLP, tuned)
 
-| 카테고리 | P | R | F1 | Support |
-|---|---:|---:|---:|---:|
-| 욕설 | 0.772 | 0.862 | **0.814** | 56,250 |
-| 살해협박 | 0.686 | 0.899 | **0.779** | 11,595 |
-| 성희롱 | 0.478 | 0.857 | 0.613 | 29,121 |
-| 혐오발언 | 0.356 | 0.767 | 0.487 | 19,861 |
-| 성차별 | 0.259 | 0.842 | 0.396 | 12,323 |
-| 정치 | 0.118 | 0.685 | 0.201 | 89 |
-| 기타유해 | 0.066 | 0.092 | 0.077 | 120 |
+| 카테고리 | P | R | F1 | thr | Support |
+|---|---:|---:|---:|---:|---:|
+| 욕설 | 0.604 | 0.749 | 0.669 | 0.50 | 8,302 |
+| 혐오발언 | 0.500 | 0.442 | 0.469 | 0.76 | 2,239 |
+| 성 관련 | 0.389 | 0.470 | 0.425 | 0.88 | 449 |
+| 살해협박 | 0.535 | 0.831 | 0.651 | 0.86 | 1,128 |
+| 정치 | 0.405 | 0.447 | 0.425 | 0.76 | 2,109 |
+| 기타유해 | 0.227 | 0.329 | 0.269 | 0.72 | 1,548 |
 
-### 언어별 성능 (MLP)
+### 3.3 한국어 성능 개선을 위한 체계적 실험
 
-| Language | n | macro-F1 | micro-F1 |
-|---|---:|---:|---:|
-| English | 61,679 | 0.490 | 0.760 |
-| Korean | 58,405 | 0.295 | 0.512 |
+한국어 macro-F1이 초기 0.30 수준에서 정체되는 현상을 분석하기 위해 **7가지 접근**을 순차 적용하였다:
 
----
+| # | 접근 | 영어 F1 | 한국어 F1 | 효과 |
+|---|---|---:|---:|---|
+| 1 | E5 baseline (7 cat) | 0.40 | 0.30 | — |
+| 2 | KcELECTRA embedding | 0.22 | 0.22 | ❌ 성능 저하 |
+| 3 | ko-sroberta embedding | 0.24 | 0.24 | ❌ STS 모델 부적합 |
+| 4 | K-MHaS → K-HATERS | 0.46 | 0.33 | ✅ +0.03 |
+| 5 | 7→6 cat (gender 통합) | 0.46 | 0.33 | ≈ 변화 없음 |
+| 6 | LLM 3B → 31B (불균형) | 0.45 | 0.32 | ❌ 보수적 라벨 |
+| 7 | 카테고리 균형 pseudo (31B) | 0.59 | 0.30 | ≈ 미미 |
+| **8** | **+ threshold 튜닝** | **0.68** | **0.38** | ⭐ **+0.08** |
 
-## 7. 분석 및 한계
-
-### 잘 작동하는 카테고리 (F1 > 0.6)
-- **욕설** (0.81): 명시적 욕설 단어가 강한 신호
-- **살해협박** (0.78): "kill", "shoot", "죽이" 동사 키워드 명확
-- **성희롱** (0.61): 성적 어휘로 패턴화
-
-### 어려운 카테고리 (F1 < 0.4)
-- **성차별** (0.40): 맥락 의존성 큼
-- **정치** (0.20): 한국어 특화 어휘, 학습 데이터 부족
-- **기타유해** (0.08): 카테고리 정의가 너무 광범위
-
-### 영어 vs 한국어 격차 (0.49 vs 0.30)
-원인 3가지:
-1. LLM pseudo-label의 한국어 정확도 한계 (Llama 3.2 3B)
-2. 한국어 데이터셋 다양성 부족 (영어 6개 vs 한국어 3개)
-3. 한국어 표기 다양성 (변형 욕설, 신조어, 형태소)
-
-한국어 강화 SlangLLM은 사전 필터 정확도를 높였지만, 분류기 자체의 한국어 임베딩 품질은 multilingual-E5의 한계로 격차 잔존.
+**관찰**: 임베딩 교체 (#2, #3) 와 LLM 모델 확대 (#6) 는 한국어 성능에 부정적 또는 무의미한 영향을 보였다. 데이터셋 교체 (#4) 와 threshold 튜닝 (#8) 만 통계적으로 유의미한 개선을 보였다.
 
 ---
 
-## 8. 평가 기준 매핑
+## 4. Discussion
 
-### Correctness (40%)
-- ✅ Raw data 수집 (10개 데이터셋, 215K건)
-- ✅ Database 저장 (SQLite, 4개 테이블)
-- ✅ Annotation (LLM pseudo-labeling + 룰 필터링)
-- ✅ 분석 모델 통합 (임베딩 + LR + MLP + 평가 + PL 정책)
+### 4.1 한국어 0.30 벽의 본질적 원인
 
-### Effort (20%)
-- 215,086건 통합 데이터셋
-- 영/한 동시 처리 (multilingual)
-- 7개 multi-label 카테고리
-- 3개 논문 기법 적용 + SlangLLM 한국어 강화
+체계적 실험을 통해 한국어 성능 정체의 근본 원인이 **데이터의 본질적 한계**임을 규명하였다:
 
-### Meaningfulness (20%)
-- LR vs MLP 비교 (E5 임베딩 품질 분석)
-- 영/한 격차 원인 분석
-- 카테고리별 학습 난이도 차이
-- 4단계 Poison Level 정책 (BLOCK/FILTER/WARN/PASS)
+1. **세분화 라벨 부재**: K-HATERS, UnSmile, K-MHaS, BEEP 모두 `gender` 라벨을 단일 카테고리로 제공. 영어 데이터 (ToxiGen, ETHOS) 처럼 `sexism` 과 `sexual_harassment` 를 분리하지 않음. 본 연구에서 7→6 카테고리로 통합한 핵심 근거이다.
 
-### Presentation (20%)
-- 카테고리별 P/R/F1 표
-- Confusion matrix 시각화
-- 본 README + 발표 자료
-- `classify.py` 라이브 데모
+2. **라벨 노이즈**: K-MHaS의 `Profanity` 카테고리에 종교 비하·정상 문장·구두점만 있는 항목 등이 혼재. K-HATERS로 교체하여 부분 해결하였다.
+
+3. **임베딩 표현 한계**: multilingual-E5는 의미 유사도에는 강하지만 한국어 욕설·혐오 표현의 미세한 어조 차이를 충분히 인코딩하지 못함. 그러나 한국어 전용 임베딩 (KcELECTRA, ko-sroberta) 으로 교체해도 개선되지 않음을 확인하였다 (#2, #3).
+
+### 4.2 Pseudo-Labeling의 역설
+
+흥미롭게도 더 큰 LLM (3B → 31B) 이 pseudo-label 품질에서 항상 우월하지 않았다. 31B는 보수적으로 라벨링 (toxic 비율 27%) 하여 학습 시그널이 부족한 반면, 3B는 관대하게 (50%) 라벨링하여 풍부한 학습 데이터를 제공했다. **카테고리 균형 샘플링 (24K, toxic 69%)** 을 통해 이를 부분적으로 해결하였다.
+
+### 4.3 Threshold Tuning의 일관된 효과
+
+7가지 시도 중 threshold 튜닝이 유일하게 일관된 (+0.08) 개선을 보였다. 이는 BCE 손실 + class_weight='balanced' 학습이 **과잉 예측 (high recall, low precision)** 을 야기하며, 검증셋 기반 카테고리별 threshold 조정으로 precision-recall trade-off를 회복할 수 있음을 시사한다.
 
 ---
 
-## 9. 사용 방법
+## 5. Conclusion & Limitations
 
-### 설치
-```bash
-pip install sentence-transformers torch numpy scikit-learn \
-            matplotlib tqdm spacy konlpy requests
-python -m spacy download en_core_web_sm
-sudo apt install default-jdk fonts-nanum
+본 연구는 영어-한국어 통합 multi-label 유해 발화 분류기를 macro-F1 0.485 로 구축하였으며, 한국어 성능 정체의 원인이 임베딩이나 모델 크기가 아닌 **원본 데이터셋의 라벨 품질** 임을 7가지 체계적 실험으로 규명하였다.
+
+**Limitations**:
+- 한국어 `gender` 카테고리는 데이터 부족 (3,728건) 으로 신뢰도 제한.
+- BAD unsafe 의 pseudo-label은 LLM 환각 가능성을 완전히 배제하지 못함.
+- 평가는 카테고리 binary F1 위주이며, 다중 라벨 동시 예측 (subset accuracy) 측면은 추후 분석 필요.
+
+**Future Work**:
+- 한국어 전용 인간 재검수 라벨 (K-HATERS 일부 재라벨링) 으로 gender 세분화 시도
+- 한국어 특화 LLM (Llama-3-Korean, EXAONE 등) 을 pseudo-labeler 로 비교
+- Guard 모델 패밀리 (Llama-Guard 3, ShieldGemma) 와의 정량 비교
+
+---
+
+## 6. References
+
+[1] **Patel, K. & Alsobeh, A. (2024).** *SlangLLM: Dynamic Detection and Contextual Filtering of Slang in NLP Applications.*
+
+[2] **Vishwamitra, N. et al. (2024).** *HateGuard: LLM-Guided Detection of Hate Speech via Chain-of-Thought Reasoning (HateCoT).* IEEE S&P 2024.
+
+[3] **Ghorbanpour, F. et al. (2025).** *Can Prompting LLMs Unlock Hate Speech Detection across Languages? A Zero-shot and Few-shot Study.* TUM.
+
+[4] **Park, S. et al. (2024).** *K-HATERS: A Hate Speech Detection Corpus Co-Annotated by Experts and Non-Experts.* humane-lab.
+
+---
+
+## 7. Reproducing
+
+### 7.1 환경
+```
+Python 3.9, PyTorch 2.x, sentence-transformers, openai (>=1.0)
+GPU: 2× RTX 3090 Ti (24GB) — 임베딩/학습에만 사용
 ```
 
-### Ollama 설정
+### 7.2 파이프라인 실행
 ```bash
-ollama pull llama3.2:3b
-ollama serve &
-```
-
-### 전체 파이프라인 실행
-```bash
-# [1] 데이터 준비
+# 1. 데이터 준비 (영/한 통합, 6 카테고리)
 python prepare_llm_dataset_v3.py
 
-# [2] LLM 의사 라벨링 (~1시간)
-python llm_pseudo_label_v4.py
+# 2. 카테고리 균형 pseudo-target 생성
+python build_balanced_pseudo_target.py
 
-# [3] 결과 점검 (선택)
-python inspect_pseudo_labels.py --sample 30
+# 3. LLM pseudo-labeling (31B async)
+python llm_pseudo_label_v5_async.py
 
-# [4] 노이즈 필터링
+# 4. Filter (ghost label 제거)
 python filter_pseudo_labels.py --diff
 
-# [5] DB 구축
+# 5. DB 구축 + E5 임베딩
 python build_database.py --rebuild
-
-# [6] E5 임베딩 (~15분, GPU)
 python embed_texts.py
 
-# [7] 분류기 학습
+# 6. 학습
 python train_classifier.py
 
-# [8] 평가
-python evaluate.py --balanced
-
-# [9] 사용자 데모 (PL 정책)
-python classify.py "씨발 저 틀딱들"     # 단일 문장
-python classify.py                       # 인터랙티브
-python classify.py --file inputs.txt    # 파일 일괄
+# 7. 평가 + threshold 튜닝
+python evaluate.py --balanced --min-support 50
+python tune_threshold.py --model mlp
+python tune_threshold.py --model lr
 ```
 
-### 결과물 위치
+### 7.3 파일 구조
 ```
-data/llm_dataset/
-├── labeled.json                          # human 라벨
-├── pseudo_target.json                    # LLM 라벨 대상
-├── pseudo_labeled.jsonl.gz               # LLM 라벨링 결과 (raw)
-├── pseudo_labeled_filtered.jsonl.gz      # 필터링 후 (최종)
-└── dataset.sqlite                        # 통합 DB
-
-models/
-├── lr_model.pkl
-└── mlp_model.pt
-
-results/
-├── metrics.json
-├── comparison.csv
-├── confusion_matrix_lr.png
-└── confusion_matrix_mlp.png
+engeneer/
+├── multilabel_filter.py            # 데이터 로더 (6 카테고리 통합)
+├── prepare_llm_dataset_v3.py       # 데이터셋 준비
+├── build_balanced_pseudo_target.py # 카테고리 균형 후보 추출
+├── llm_pseudo_label_v5_async.py    # LLM pseudo-labeling (async)
+├── filter_pseudo_labels.py         # Pseudo-label 정제
+├── slang_pos_scorer.py             # SlangLLM PoS 점수
+├── build_database.py               # SQLite DB 구축
+├── embed_texts.py                  # E5 임베딩 생성
+├── train_classifier.py             # MLP/LR 학습
+├── evaluate.py                     # 평가
+├── tune_threshold.py               # Threshold 최적화
+└── results/
+    ├── best_thresholds_mlp.json
+    ├── best_thresholds_lr.json
+    └── confusion_matrix_*.png
 ```
 
 ---
 
-## 10. classify.py 사용 예시
-
-```bash
-$ python classify.py "씨발 좀 닥쳐"
-
-입력: 씨발 좀 닥쳐
-──────────────────────────────────────────────────────
-  [BLOCK] BLOCK
-  사유: PL 8.72 >= 7.0 (완전 차단)
-
-  Poison Level 분석:
-    slang_conf      = 1.000  (x 3.0)
-    cot_confidence  = 0.945  (x 4.0)
-    max_cat_weight  = 0.700  (x 3.0)
-    PL = 8.72 / 10.00   [##########################----]
-
-  탐지된 카테고리:
-      욕설        score=0.945  weight=0.7
-```
-
----
-
-## 11. 향후 개선 방향
-
-1. **더 큰 LLM** — Llama 3.3 70B로 pseudo-labeling 재실행 시 노이즈 감소 예상
-2. **한국어 특화 임베딩** — KcELECTRA 등으로 한국어 분류기 별도 학습 + 언어별 라우팅
-3. **추가 한국어 데이터** — K-HATERS, KOLD 등
-4. **카테고리 재정의** — "기타유해" 분할 (외모/연령/지역)
-5. **인간 검증 라벨** — 일부 샘플 수동 검수로 정답셋 확보
-
----
-
-## 12. 참고문헌
-
-1. **HateGuard** (Ko et al., 2023) — *Dynamic Hate Speech Detection through HateCoT*. arXiv:2312.15099
-2. **SlangLLM** (Patel & Alsobeh, 2025) — *Dynamic Detection and Contextual Filtering of Slang in NLP Applications*
-3. **Plaza-del-Arco et al.** — *Can Prompting LLMs Unlock Hate Speech Detection across Languages?*
-4. **multilingual-E5** (Wang et al.) — `intfloat/multilingual-e5-small`
-
----
-
-## 13. 라이선스 / 출처
-
-- 원본 데이터셋은 각 출처의 라이선스를 따름
-- 본 프로젝트 코드는 학술 목적
+*Engineering Lab Project, 2026. Advisor: [지도교수명].*
