@@ -132,7 +132,7 @@ K-HATERS 매핑은 `label × target_label` 구조를 활용하였다:
 | 3 | ko-sroberta embedding | 0.24 | 0.24 | ❌ STS 모델 부적합 |
 | 4 | K-MHaS → K-HATERS | 0.46 | 0.33 | ✅ +0.03 |
 | 5 | 7→6 cat (gender 통합) | 0.46 | 0.33 | ≈ 변화 없음 |
-| 6 | LLM 3B → 31B (불균형) | 0.45 | 0.32 | ❌ 보수적 라벨 |
+| 6 | ollama 3B → Gemma31B (불균형) | 0.45 | 0.32 | ❌ 보수적 라벨 |
 | 7 | 카테고리 균형 pseudo (31B) | 0.59 | 0.30 | ≈ 미미 |
 | **8** | **+ threshold 튜닝** | **0.68** | **0.38** | ⭐ **+0.08** |
 
@@ -230,7 +230,6 @@ python tune_threshold.py --model lr
 engeneer/
 ├── multilabel_filter.py            # 데이터 로더 (6 카테고리 통합)
 ├── prepare_llm_dataset_v3.py       # 데이터셋 준비
-├── build_balanced_pseudo_target.py # 카테고리 균형 후보 추출
 ├── llm_pseudo_label_v5_async.py    # LLM pseudo-labeling (async)
 ├── filter_pseudo_labels.py         # Pseudo-label 정제
 ├── slang_pos_scorer.py             # SlangLLM PoS 점수
@@ -247,4 +246,3 @@ engeneer/
 
 ---
 
-*Engineering Lab Project, 2026. Advisor: [지도교수명].*
