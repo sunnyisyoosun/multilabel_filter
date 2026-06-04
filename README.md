@@ -203,23 +203,21 @@ GPU: 2× RTX 3090 Ti (24GB) — 임베딩/학습에만 사용
 # 1. 데이터 준비 (영/한 통합, 6 카테고리)
 python prepare_llm_dataset_v3.py
 
-# 2. 카테고리 균형 pseudo-target 생성
-python build_balanced_pseudo_target.py
 
-# 3. LLM pseudo-labeling (31B async)
+# 2. LLM pseudo-labeling (31B async)
 python llm_pseudo_label_v5_async.py
 
-# 4. Filter (ghost label 제거)
+# 3. Filter (ghost label 제거)
 python filter_pseudo_labels.py --diff
 
-# 5. DB 구축 + E5 임베딩
+# 4. DB 구축 + E5 임베딩
 python build_database.py --rebuild
 python embed_texts.py
 
-# 6. 학습
+# 5. 학습
 python train_classifier.py
 
-# 7. 평가 + threshold 튜닝
+# 6. 평가 + threshold 튜닝
 python evaluate.py --balanced --min-support 50
 python tune_threshold.py --model mlp
 python tune_threshold.py --model lr
